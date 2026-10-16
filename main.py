@@ -8,6 +8,7 @@ from jig_calib import (
     CALIBRATION_END_MINUTES,
     CALIBRATION_START_TEXT,
     CALIBRATION_END_TEXT,
+    normal_plot_displacement,
     CALIBRATION_DB,
     CALIBRATION_LIMITS,
     CALIBRATION_BUTTONS,
@@ -2877,7 +2878,7 @@ class Ui_MainWindow(JigCalibrationMixin, QMainWindow):
                 font-family:Consolas,monospace; border-bottom:1px solid #3A1010;
             }
         """)
-        self.label_2.setText("✗   FAIL — CHECK DISPLACEMENT")
+        self.label_2.setText("✗   The serial number is invalid previous stage not done")
         self._flash_border("#FF4F4F")
 
         # ── Centred FAIL popup ────────────────────────────────────────
@@ -3299,8 +3300,45 @@ class Ui_MainWindow(JigCalibrationMixin, QMainWindow):
             ["status", "in", ["fail", "completely fail"]],
         ])
 
-    def check_serial_exists(self, serial_number):
-        return True  # Preserve the existing intentionally bypassed prerequisite.
+    def check_serial_exists(self,serial_number):
+        
+       
+        """
+        Check if serial number exists in ERP under the given system.
+        Returns True if exists, False if not.
+        """
+        SYSTEM_NAME =["C10PostChargingCurrent","HS3PostChargingCurrent"]
+        filters = [
+            ["device_serialnumber", "=", serial_number.strip()],
+            ["system", "in", SYSTEM_NAME],
+            ["status", "=", "pass"]
+        ]
+
+        try:
+            response = requests.get(
+                ERP_PASS,
+                headers=HEADERS,
+                params={"filters": json.dumps(filters)}
+            )
+
+            if response.status_code != 200:
+                print(f"❌ ERP Error: Status code {response.status_code}")
+                return False  # Treat error as not found (or handle as needed)
+
+            data = response.json()
+            results = data.get("data", [])
+
+            if results:
+                print(f"❌ Serial number '{serial_number}' already exists in '{SYSTEM_NAME}'")
+                return True
+            else:
+                print(f"✅ Serial number '{serial_number}' is new in '{SYSTEM_NAME}'")
+                return False
+
+        except Exception as e:
+            print(f"⚠️ Exception connecting to ERP: {e}")
+            return False
+
 
     def validate_serial_1(self, serial_number):
         return True
@@ -3433,7 +3471,14 @@ class Ui_MainWindow(JigCalibrationMixin, QMainWindow):
                 self.live_graph.begin_peak_hold(graph_key)
 
         def collect(data):
-            callback(data)
+            # Force decisions must precede graph/UI work on the reader thread.
+            check_force(data)
+            try:
+                callback(data)
+            except Exception:
+                logger.exception("Graph callback failed; force monitoring remains active")
+
+        def check_force(data):
             point = self._parse_point(data)
             if not active or point is None or not math.isfinite(point[0]):
                 return
@@ -3529,6 +3574,8 @@ class Ui_MainWindow(JigCalibrationMixin, QMainWindow):
         try:
             # Finish original positioning before starting the cancellable press.
             wait_idle()
+            if self._press_abort.is_set():
+                raise RuntimeError("Sequence aborted before pressing")
             active = True
             state["last_sample"] = time.monotonic()
             # Short relative jogs are streamed ahead without waiting for each
@@ -3543,7 +3590,9 @@ class Ui_MainWindow(JigCalibrationMixin, QMainWindow):
             while True:
                 now = time.monotonic()
                 if not state["cancelled"]:
-                    if now - state["last_sample"] > 0.5:
+                    if self._press_abort.is_set():
+                        state["failure"] = "Press cancelled: sequence aborted"
+                    elif now - state["last_sample"] > 0.5:
                         state["failure"] = "Force readings stopped during press"
                     elif now >= deadline:
                         state["failure"] = "No force stop reached within press timeout"
@@ -3690,15 +3739,29 @@ class Ui_MainWindow(JigCalibrationMixin, QMainWindow):
             self._anim_reset()
             return
 
+        self._press_abort = threading.Event()
+        self._active_press_worker = None
+
+        def cancel_active_press():
+            self._press_abort.set()
+            port = self.serial_thread.ser
+            if port is not None and port.is_open:
+                port.write(b"\x85")  # Cancel all queued jog segments.
+                port.write(b"!")     # Hold any regular movement on an abort.
+
         def _run():
             press_worker = None
             press_errors = []
 
             def check_press_finished():
+                # Keep the reader running while waiting for motion supervision.
+                if press_worker is not None:
+                    press_worker.join(timeout=20.0)
+                    if press_worker.is_alive():
+                        cancel_active_press()
+                        raise RuntimeError("Press worker did not finish; motion cancelled")
                 if press_errors:
                     raise press_errors[0]
-                if press_worker is not None and press_worker.is_alive():
-                    raise RuntimeError("Press exceeded the original button timing; sequence aborted")
 
             def launch_press(position, callback, return_home=False):
                 nonlocal press_worker
@@ -3706,38 +3769,42 @@ class Ui_MainWindow(JigCalibrationMixin, QMainWindow):
 
                 def press():
                     try:
+                        if self._press_abort.is_set():
+                            raise RuntimeError("Sequence aborted before positioning")
                         self.send_gcode(position, callback)
                         self._press_until_dip_plus_2n(callback)
+                        if self._press_abort.is_set():
+                            raise RuntimeError("Sequence aborted before retract")
                         self.send_gcode("G0 Z14", callback)
                         if self._calibration_mode:
                             result = self._force_press_results.get(callback.__name__.replace("handle_data_btn", ""), {})
-                            # Judge golden-device limits only after all three presses
-                            # and the existing return-home move have completed.
-                            # Controller safety failures still abort immediately.
+                            
                             if result.get("failure"):
                                 raise RuntimeError(result["failure"])
                         if return_home:
                             self.send_gcode("G0 X8.570 Y38.629 Z10", callback)
                     except Exception as exc:
+                        cancel_active_press()
                         press_errors.append(exc)
                         print(f"MOTOR ERROR: {exc}", flush=True)
                         self._sig_motor_error.emit(str(exc))
 
                 press_worker = threading.Thread(target=press, daemon=True)
+                self._active_press_worker = press_worker
                 press_worker.start()
 
             # Use plain time.sleep — we are already off the main thread
             time.sleep(3)
             # if selected_model ="C10":
-            # if not self.check_serial_exists(self.serial_number):
-            #     QtCore.QMetaObject.invokeMethod(self, "_anim_finish_fail", Qt.QueuedConnection)
-            #     QtCore.QMetaObject.invokeMethod(self, "_progress_done_fail", Qt.QueuedConnection)
-            #     return
+            if not self.check_serial_exists(self.serial_number):
+                QtCore.QMetaObject.invokeMethod(self, "_anim_finish_fail", Qt.QueuedConnection)
+                QtCore.QMetaObject.invokeMethod(self, "_progress_done_fail", Qt.QueuedConnection)
+                return
 
-            # if self.check_serial_existss(self.serial_number):
-            #     QtCore.QMetaObject.invokeMethod(self, "_anim_finish_fail", Qt.QueuedConnection)
-            #     QtCore.QMetaObject.invokeMethod(self, "_progress_done_fail", Qt.QueuedConnection)
-            #     return
+            if self.check_serial_existss(self.serial_number):
+                QtCore.QMetaObject.invokeMethod(self, "_anim_finish_fail", Qt.QueuedConnection)
+                QtCore.QMetaObject.invokeMethod(self, "_progress_done_fail", Qt.QueuedConnection)
+                return
 
 
            
@@ -3783,7 +3850,17 @@ class Ui_MainWindow(JigCalibrationMixin, QMainWindow):
                 if self._calibration_mode:
                     QtCore.QMetaObject.invokeMethod(self, "_calibration_aborted", Qt.QueuedConnection)
                 print(f"Dip-controlled press aborted: {exc}")
-                self.serial_thread.stop(keep_grbl_open=True)
+                cancel_active_press()
+                worker = self._active_press_worker
+                if worker is not None:
+                    worker.join(timeout=20.0)
+                if worker is not None and worker.is_alive():
+                    # Do not close ports under a live motion worker or permit a new test.
+                    self._homed = False
+                    print("Motion worker still active; force reader retained. Restart required.", flush=True)
+                else:
+                    self.serial_thread.stop(keep_grbl_open=True)
+                self._homed = False  # An aborted motion requires rehoming/restart.
                 QtCore.QMetaObject.invokeMethod(self, "_anim_finish_fail", Qt.QueuedConnection)
                 QtCore.QMetaObject.invokeMethod(self, "_progress_done_fail", Qt.QueuedConnection)
 
@@ -4027,17 +4104,17 @@ class Ui_MainWindow(JigCalibrationMixin, QMainWindow):
         print("AUTO RESULT:", auto_result, fail_reason)
 
         # ── Highlight each card's DIP box green/red individually ──────
-        if getattr(self, "_force_press_results", {}).get("1", {}).get("failure") or not dips["right"] or not (5 <= dips["right"][0] <= 15):
+        if getattr(self, "_force_press_results", {}).get("1", {}).get("failure") or not dips["right"] or not (8.5 <= dips["right"][0] <= 20.5):
             self.haptic_right.highlight_dip(passed=False)
         else:
             self.haptic_right.highlight_dip(passed=True)
 
-        if getattr(self, "_force_press_results", {}).get("2", {}).get("failure") or not dips["centre"] or not (5 <= dips["centre"][0] <= 15):
+        if getattr(self, "_force_press_results", {}).get("2", {}).get("failure") or not dips["centre"] or not (8 <= dips["centre"][0] <= 13):
             self.haptic_centre.highlight_dip(passed=False)
         else:
             self.haptic_centre.highlight_dip(passed=True)
 
-        if getattr(self, "_force_press_results", {}).get("3", {}).get("failure") or not dips["left"] or not (5 <= dips["left"][0] <= 15):
+        if getattr(self, "_force_press_results", {}).get("3", {}).get("failure") or not dips["left"] or not (8.5 <= dips["left"][0] <= 20.5):
             self.haptic_left.highlight_dip(passed=False)
         else:
             self.haptic_left.highlight_dip(passed=True)
