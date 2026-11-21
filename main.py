@@ -51,8 +51,8 @@ logger = logging.getLogger(__name__)
 REQUEST_TIMEOUT = float(os.getenv("C10_REQUEST_TIMEOUT", "10"))
 WS_SERVER_URL = os.getenv("C10_WS_SERVER_URL", "ws://192.168.0.200:8050")
 SQL_UPLOAD_URL = os.getenv("C10_SQL_UPLOAD_URL", "http://192.168.0.200:8000/upload_sql_data_1")
-ARDUINO_PORT = os.getenv("C10_ARDUINO_PORT", "/dev/ttyUSB1")
-GRBL_PORT = os.getenv("C10_GRBL_PORT", "/dev/ttyUSB0")
+ARDUINO_PORT = os.getenv("C10_ARDUINO_PORT", "/dev/ttyUSB0")
+GRBL_PORT = os.getenv("C10_GRBL_PORT", "/dev/ttyUSB1")
 
 
 
@@ -3782,7 +3782,7 @@ class Ui_MainWindow(JigCalibrationMixin, QMainWindow):
                             if result.get("failure"):
                                 raise RuntimeError(result["failure"])
                         if return_home:
-                            self.send_gcode("G0 X8.570 Y38.629 Z10", callback)
+                            self.send_gcode("G0 X10.762 Y56.259 Z10", callback)
                     except Exception as exc:
                         cancel_active_press()
                         press_errors.append(exc)
@@ -3812,7 +3812,7 @@ class Ui_MainWindow(JigCalibrationMixin, QMainWindow):
             QtCore.QMetaObject.invokeMethod(self, "_anim_set_stage_right",   Qt.QueuedConnection)
             QtCore.QMetaObject.invokeMethod(self, "_haptic_right_start",     Qt.QueuedConnection)
             QtCore.QMetaObject.invokeMethod(self, "_progress_btn1",          Qt.QueuedConnection)
-            launch_press("G0 X97.159 Y45.527 Z10.865", self.handle_data_btn1)
+            launch_press("G0 X97.159 Y45.527 Z14", self.handle_data_btn1)
             time.sleep(14)
             check_press_finished()
             QtCore.QMetaObject.invokeMethod(self, "_haptic_right_end", Qt.QueuedConnection)
@@ -3823,7 +3823,7 @@ class Ui_MainWindow(JigCalibrationMixin, QMainWindow):
             QtCore.QMetaObject.invokeMethod(self, "_anim_set_stage_centre2", Qt.QueuedConnection)
             QtCore.QMetaObject.invokeMethod(self, "_haptic_centre_start",    Qt.QueuedConnection)
             QtCore.QMetaObject.invokeMethod(self, "_progress_btn2",          Qt.QueuedConnection)
-            launch_press("G0 X97.159 Y66.991 Z10.865", self.handle_data_btn2)
+            launch_press("G0 X91.485 Y56.248 Z14", self.handle_data_btn2)
             time.sleep(10)
             check_press_finished()
             QtCore.QMetaObject.invokeMethod(self, "_haptic_centre_end", Qt.QueuedConnection)
@@ -3834,7 +3834,7 @@ class Ui_MainWindow(JigCalibrationMixin, QMainWindow):
             QtCore.QMetaObject.invokeMethod(self, "_anim_set_stage_left2",   Qt.QueuedConnection)
             QtCore.QMetaObject.invokeMethod(self, "_haptic_left_start",      Qt.QueuedConnection)
             QtCore.QMetaObject.invokeMethod(self, "_progress_btn3",          Qt.QueuedConnection)
-            launch_press("G0 X94.967 Y49.361 Z14", self.handle_data_btn3, return_home=True)
+            launch_press("G0 X97.159 Y66.991 Z14", self.handle_data_btn3, return_home=True)
             QtCore.QMetaObject.invokeMethod(self, "_anim_set_stage_home",    Qt.QueuedConnection)
             time.sleep(12)
             check_press_finished()
