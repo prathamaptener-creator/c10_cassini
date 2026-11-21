@@ -3752,6 +3752,7 @@ class Ui_MainWindow(JigCalibrationMixin, QMainWindow):
         def _run():
             press_worker = None
             press_errors = []
+            clearance_move = "G0 Z2.410"
 
             def check_press_finished():
                 # Keep the reader running while waiting for motion supervision.
@@ -3775,14 +3776,15 @@ class Ui_MainWindow(JigCalibrationMixin, QMainWindow):
                         self._press_until_dip_plus_2n(callback)
                         if self._press_abort.is_set():
                             raise RuntimeError("Sequence aborted before retract")
-                        self.send_gcode("G0 Z14", callback)
+                        self.send_gcode(clearance_move, callback)
                         if self._calibration_mode:
                             result = self._force_press_results.get(callback.__name__.replace("handle_data_btn", ""), {})
                             
                             if result.get("failure"):
                                 raise RuntimeError(result["failure"])
                         if return_home:
-                            self.send_gcode("G0 X8.570 Y38.629 Z10", callback)
+                            self.send_gcode("G0 X10.762 Y56.259", callback)
+                            self.send_gcode("G0 Z6.410", callback)
                     except Exception as exc:
                         cancel_active_press()
                         press_errors.append(exc)
@@ -3812,7 +3814,9 @@ class Ui_MainWindow(JigCalibrationMixin, QMainWindow):
             QtCore.QMetaObject.invokeMethod(self, "_anim_set_stage_right",   Qt.QueuedConnection)
             QtCore.QMetaObject.invokeMethod(self, "_haptic_right_start",     Qt.QueuedConnection)
             QtCore.QMetaObject.invokeMethod(self, "_progress_btn1",          Qt.QueuedConnection)
-            launch_press("G0 X94.967 Y27.897 Z14", self.handle_data_btn1)
+            self.send_gcode("G21 G90", self.handle_data_btn1)
+            self.send_gcode(clearance_move, self.handle_data_btn1)
+            launch_press("G0 X140.358 Y40.161", self.handle_data_btn1)
             time.sleep(14)
             check_press_finished()
             QtCore.QMetaObject.invokeMethod(self, "_haptic_right_end", Qt.QueuedConnection)
@@ -3823,7 +3827,7 @@ class Ui_MainWindow(JigCalibrationMixin, QMainWindow):
             QtCore.QMetaObject.invokeMethod(self, "_anim_set_stage_centre2", Qt.QueuedConnection)
             QtCore.QMetaObject.invokeMethod(self, "_haptic_centre_start",    Qt.QueuedConnection)
             QtCore.QMetaObject.invokeMethod(self, "_progress_btn2",          Qt.QueuedConnection)
-            launch_press("G0 X89.293 Y38.618 Z14", self.handle_data_btn2)
+            launch_press("G0 X131.846 Y56.243", self.handle_data_btn2)
             time.sleep(10)
             check_press_finished()
             QtCore.QMetaObject.invokeMethod(self, "_haptic_centre_end", Qt.QueuedConnection)
@@ -3834,7 +3838,7 @@ class Ui_MainWindow(JigCalibrationMixin, QMainWindow):
             QtCore.QMetaObject.invokeMethod(self, "_anim_set_stage_left2",   Qt.QueuedConnection)
             QtCore.QMetaObject.invokeMethod(self, "_haptic_left_start",      Qt.QueuedConnection)
             QtCore.QMetaObject.invokeMethod(self, "_progress_btn3",          Qt.QueuedConnection)
-            launch_press("G0 X94.967 Y49.361 Z14", self.handle_data_btn3, return_home=True)
+            launch_press("G0 X140.358 Y72.357", self.handle_data_btn3, return_home=True)
             QtCore.QMetaObject.invokeMethod(self, "_anim_set_stage_home",    Qt.QueuedConnection)
             time.sleep(12)
             check_press_finished()
