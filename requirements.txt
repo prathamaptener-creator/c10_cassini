@@ -1,0 +1,10 @@
+# C10 Cassini Python dependencies.
+PyQt5
+matplotlib
+numpy
+pyserial
+requests
+python-dotenv
+Flask
+schedule
+websocket-client
