@@ -1807,8 +1807,8 @@ class EmployeeEntry(QWidget):
         }
 
         config = model_config[selected_model]
-        job_card_id = fetch_job_card_for_employee(employee_id, config["item_code"])
-        # ~ job_card_id = "123"
+        # job_card_id = fetch_job_card_for_employee(employee_id, config["item_code"])
+        job_card_id = "123"
 
         if not job_card_id:
             self.show_popup(
