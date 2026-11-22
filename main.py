@@ -53,8 +53,8 @@ logger = logging.getLogger(__name__)
 REQUEST_TIMEOUT = float(os.getenv("C10_REQUEST_TIMEOUT", "10"))
 WS_SERVER_URL = os.getenv("C10_WS_SERVER_URL", "ws://192.168.0.200:8050")
 SQL_UPLOAD_URL = os.getenv("C10_SQL_UPLOAD_URL", "http://192.168.0.200:8000/upload_sql_data_1")
-ARDUINO_PORT = os.getenv("C10_ARDUINO_PORT", "/dev/ttyUSB1")
-GRBL_PORT = os.getenv("C10_GRBL_PORT", "/dev/ttyUSB0")
+ARDUINO_PORT = os.getenv("C10_ARDUINO_PORT", "/dev/ttyUSB0")
+GRBL_PORT = os.getenv("C10_GRBL_PORT", "/dev/ttyUSB1")
 
 
 
@@ -1807,8 +1807,8 @@ class EmployeeEntry(QWidget):
         }
 
         config = model_config[selected_model]
-        # job_card_id = fetch_job_card_for_employee(employee_id, config["item_code"])
-        job_card_id = "123"
+        job_card_id = fetch_job_card_for_employee(employee_id, config["item_code"])
+        # ~ job_card_id = "123"
 
         if not job_card_id:
             self.show_popup(
@@ -3401,7 +3401,7 @@ class Ui_MainWindow(JigCalibrationMixin, QMainWindow):
         samples = []
         state = {"dip": None, "last_sample": time.monotonic(), "cancelled": False, "failure": None,
                  "peak": None, "cancel_force": None, "cancel_rate": None,
-                 "stop_reason": None, "last_force_at_stop": None}
+                 "stop_reason": None, "last_force_at_stop": None, "cancelled_at": None}
 
         # ── Predictive stop ──────────────────────────────────────────
         # The plunger cannot stop instantly: between the cancel being
@@ -3435,6 +3435,7 @@ class Ui_MainWindow(JigCalibrationMixin, QMainWindow):
             # Caller holds motion_lock.
             state["stop_reason"] = reason
             state["last_force_at_stop"] = samples[-1] if samples else None
+            state["cancelled_at"] = time.monotonic()
             state["cancelled"] = True
             port.write(b"\x85")
             if graph_key:
@@ -3467,25 +3468,17 @@ class Ui_MainWindow(JigCalibrationMixin, QMainWindow):
             if state["dip"] is not None and state["dip"] > 20.0:
                 state["failure"] = "Force was out of range 20"
             target = None if state["dip"] is None else state["dip"] + 2.0
-            # Retain the motion safety stop; only the detected DIP decides
-            # the 20 N quality failure, not the subsequent peak.
-            if force >= 20.0 and state["dip"] is None:
-                state["failure"] = "No dip found before 20 N safety stop"
+            if target is None and force >= 20.5:
+                state["failure"] = "No dip found at 20.5 N force cutoff"
             rate = rise_rate() if target is not None else 0.0
             predicted = force + rate * stop_lead
-            if state["failure"] or force >= 20.0 or (target is not None and predicted >= target):
+            if state["failure"] or (target is not None and predicted >= target):
                 with motion_lock:
                     if not state["cancelled"]:
                         state["cancel_force"] = force
                         state["cancel_rate"] = rate
                         state["peak"] = force
-                        if state["failure"]:
-                            reason = state["failure"]
-                        elif force >= 20.0:
-                            reason = "20 N force cutoff"
-                        else:
-                            reason = "Predicted dip + 2 N target"
-                        cancel_jog(reason)
+                        cancel_jog(state["failure"] or "Predicted dip + 2 N target")
 
         response_buffer = bytearray()
 
@@ -3550,7 +3543,6 @@ class Ui_MainWindow(JigCalibrationMixin, QMainWindow):
             # 0.5 mm is a streaming increment, not a button travel endpoint.
             press_started = time.monotonic()
             next_segment = press_started
-            deadline = press_started + 8.0
             last_query = 0.0
             segments_sent = 0
             stop_query_started = False
@@ -3559,8 +3551,6 @@ class Ui_MainWindow(JigCalibrationMixin, QMainWindow):
                 if not state["cancelled"]:
                     if now - state["last_sample"] > 0.5:
                         state["failure"] = "Force readings stopped during press"
-                    elif now >= deadline:
-                        state["failure"] = "No force stop reached within press timeout"
                     if state["failure"]:
                         with motion_lock:
                             if not state["cancelled"]:
@@ -3614,7 +3604,7 @@ class Ui_MainWindow(JigCalibrationMixin, QMainWindow):
                               f"{measured*1000:.0f} ms, next {self._stop_lead_s*1000:.0f} ms",
                               flush=True)
                     return
-                if state["cancelled"] and now > deadline + 3.0:
+                if state["cancelled"] and now > state["cancelled_at"] + 3.0:
                     raise RuntimeError("GRBL did not stop after jog cancellation")
                 query_interval = 0.01 if stop_query_started else 0.05
                 if time.monotonic() - last_query >= query_interval:
@@ -3722,9 +3712,7 @@ class Ui_MainWindow(JigCalibrationMixin, QMainWindow):
 
             def check_press_finished():
                 if press_worker is not None:
-                    press_worker.join(timeout=25.0)
-                    if press_worker.is_alive():
-                        raise RuntimeError("Press worker did not finish; sequence aborted")
+                    press_worker.join()
                 if press_errors:
                     raise press_errors[0]
 
