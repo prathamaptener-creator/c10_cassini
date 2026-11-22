@@ -54,7 +54,7 @@ REQUEST_TIMEOUT = float(os.getenv("C10_REQUEST_TIMEOUT", "10"))
 WS_SERVER_URL = os.getenv("C10_WS_SERVER_URL", "ws://192.168.0.200:8050")
 SQL_UPLOAD_URL = os.getenv("C10_SQL_UPLOAD_URL", "http://192.168.0.200:8000/upload_sql_data_1")
 ARDUINO_PORT = os.getenv("C10_ARDUINO_PORT", "/dev/ttyUSB1")
-GRBL_PORT = os.getenv("C10_GRBL_PORT", "/dev/ttyUSB2")
+GRBL_PORT = os.getenv("C10_GRBL_PORT", "/dev/ttyUSB0")
 
 
 
