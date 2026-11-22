@@ -53,8 +53,8 @@ logger = logging.getLogger(__name__)
 REQUEST_TIMEOUT = float(os.getenv("C10_REQUEST_TIMEOUT", "10"))
 WS_SERVER_URL = os.getenv("C10_WS_SERVER_URL", "ws://192.168.0.200:8050")
 SQL_UPLOAD_URL = os.getenv("C10_SQL_UPLOAD_URL", "http://192.168.0.200:8000/upload_sql_data_1")
-ARDUINO_PORT = os.getenv("C10_ARDUINO_PORT", "/dev/ttyUSB1")
-GRBL_PORT = os.getenv("C10_GRBL_PORT", "/dev/ttyUSB0")
+ARDUINO_PORT = os.getenv("C10_ARDUINO_PORT", "/dev/ttyUSB0")
+GRBL_PORT = os.getenv("C10_GRBL_PORT", "/dev/ttyUSB1")
 
 
 
@@ -1807,8 +1807,8 @@ class EmployeeEntry(QWidget):
         }
 
         config = model_config[selected_model]
-        # job_card_id = fetch_job_card_for_employee(employee_id, config["item_code"])
-        job_card_id = "123"
+        job_card_id = fetch_job_card_for_employee(employee_id, config["item_code"])
+        # ~ job_card_id = "123"
 
         if not job_card_id:
             self.show_popup(
@@ -3400,7 +3400,8 @@ class Ui_MainWindow(JigCalibrationMixin, QMainWindow):
         motion_lock = threading.Lock()
         samples = []
         state = {"dip": None, "last_sample": time.monotonic(), "cancelled": False, "failure": None,
-                 "peak": None, "cancel_force": None, "cancel_rate": None}
+                 "peak": None, "cancel_force": None, "cancel_rate": None,
+                 "stop_reason": None, "last_force_at_stop": None}
 
         # ── Predictive stop ──────────────────────────────────────────
         # The plunger cannot stop instantly: between the cancel being
@@ -3430,8 +3431,10 @@ class Ui_MainWindow(JigCalibrationMixin, QMainWindow):
         graph_key = {"handle_data_btn1": "right", "handle_data_btn2": "centre",
                      "handle_data_btn3": "left"}.get(getattr(callback, "__name__", ""))
 
-        def cancel_jog():
+        def cancel_jog(reason):
             # Caller holds motion_lock.
+            state["stop_reason"] = reason
+            state["last_force_at_stop"] = samples[-1] if samples else None
             state["cancelled"] = True
             port.write(b"\x85")
             if graph_key:
@@ -3476,7 +3479,13 @@ class Ui_MainWindow(JigCalibrationMixin, QMainWindow):
                         state["cancel_force"] = force
                         state["cancel_rate"] = rate
                         state["peak"] = force
-                        cancel_jog()
+                        if state["failure"]:
+                            reason = state["failure"]
+                        elif force >= 20.0:
+                            reason = "20 N force cutoff"
+                        else:
+                            reason = "Predicted dip + 2 N target"
+                        cancel_jog(reason)
 
         response_buffer = bytearray()
 
@@ -3554,7 +3563,8 @@ class Ui_MainWindow(JigCalibrationMixin, QMainWindow):
                         state["failure"] = "No force stop reached within press timeout"
                     if state["failure"]:
                         with motion_lock:
-                            cancel_jog()
+                            if not state["cancelled"]:
+                                cancel_jog(state["failure"])
                     elif now >= next_segment:
                         with motion_lock:
                             if not state["cancelled"]:
@@ -3581,6 +3591,16 @@ class Ui_MainWindow(JigCalibrationMixin, QMainWindow):
                 if stop_query_started and response.startswith("<Idle") and not self.serial_thread.pending_grbl_commands:
                     key = callback.__name__.replace("handle_data_btn", "")
                     self._force_press_results[key] = dict(state)
+                    dip = state["dip"]
+                    dip_text = "none" if dip is None else f"{dip:.2f} N"
+                    target_text = "none" if dip is None else f"{dip + 2.0:.2f} N"
+                    force = state["last_force_at_stop"]
+                    force_text = "none" if force is None else f"{force:.2f} N"
+                    elapsed = time.monotonic() - press_started
+                    button = graph_key.title() if graph_key else f"Button {key}"
+                    print(f"[PRESS {button}] Retracting: {state['stop_reason']} | "
+                          f"dip={dip_text}, target={target_text}, last force={force_text}, "
+                          f"elapsed={elapsed:.2f} s", flush=True)
                     # Learn the real stop lead from this press.
                     if (state["dip"] is not None and not state["failure"]
                             and state["cancel_rate"] and state["cancel_rate"] > 2.0
