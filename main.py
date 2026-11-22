@@ -18,6 +18,8 @@ from jig_calib import (
     ist_now,
     is_jig_active,
 )
+from erp import fetch_job_card_for_employee
+
 
 from datetime import datetime, timedelta, timezone
 
@@ -84,6 +86,113 @@ import numpy as np
 # ═══════════════════════════════════════════════════════════════════
 #  LIVE GRAPH CANVAS — real-time Arduino readings with dip animation
 # ═══════════════════════════════════════════════════════════════════
+
+class ViewToggle(QtWidgets.QAbstractButton):
+    """Animated sliding switch: unchecked Technician, checked Admin."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setCheckable(True)
+        self.setFixedSize(56, 28)
+        self.setCursor(QtGui.QCursor(Qt.PointingHandCursor))
+        self.setAccessibleName("Admin view")
+        self.setToolTip("Switch between Technician and Admin views")
+        self._position = 0.0
+        self._animation = QtCore.QPropertyAnimation(self, b"position", self)
+        self._animation.setDuration(180)
+        self._animation.setEasingCurve(QtCore.QEasingCurve.InOutCubic)
+        self.toggled.connect(self._animate)
+
+    @QtCore.pyqtProperty(float)
+    def position(self):
+        return self._position
+
+    @position.setter
+    def position(self, value):
+        self._position = value
+        self.update()
+
+    def _animate(self, checked):
+        self._animation.stop()
+        self._animation.setStartValue(self._position)
+        self._animation.setEndValue(1.0 if checked else 0.0)
+        self._animation.start()
+
+    def paintEvent(self, event):
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.Antialiasing)
+        track = QtGui.QColor("#2586E8" if self.isChecked() else "#273C50")
+        painter.setPen(QtGui.QPen(QtGui.QColor("#78BBFF" if self.hasFocus() else "#45617A"), 1))
+        painter.setBrush(track)
+        painter.drawRoundedRect(QtCore.QRectF(1, 1, 54, 26), 13, 13)
+        x = 4 + 28 * self._position
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QtGui.QColor(0, 0, 0, 55))
+        painter.drawEllipse(QtCore.QRectF(x, 5, 20, 20))
+        painter.setBrush(QtGui.QColor("#FFFFFF"))
+        painter.drawEllipse(QtCore.QRectF(x, 4, 20, 20))
+        painter.end()
+
+
+class TestResultPanel(QtWidgets.QWidget):
+    """Large in-place result; graph compatibility hooks do no rendering."""
+    def __init__(self):
+        super().__init__()
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(30, 30, 30, 30)
+        layout.addStretch()
+        self.title = QtWidgets.QLabel()
+        self.title.setAlignment(Qt.AlignCenter)
+        self.detail = QtWidgets.QLabel()
+        self.detail.setAlignment(Qt.AlignCenter)
+        self.detail.setWordWrap(True)
+        layout.addWidget(self.title)
+        layout.addWidget(self.detail)
+        layout.addStretch()
+        self._admin = False
+        self._graph = None
+        self.show_state("READY", "Scan a serial number to begin", "#8FAAC0")
+
+    def show_state(self, title, detail="", color="#00FFD1"):
+        self.title.setText(title)
+        self.title.setStyleSheet(f"color:{color};font-size:72px;font-weight:900;background:transparent;border:none;")
+        self.detail.setText(detail)
+        self.detail.setStyleSheet("color:#C8DFF0;font-size:20px;background:transparent;border:none;padding:16px;")
+
+    def set_admin(self, enabled):
+        self._admin = bool(enabled)
+        if enabled and self._graph is None:
+            self._graph = LiveGraphCanvas()
+            self.layout().addWidget(self._graph, 1)
+        self.title.setVisible(not enabled)
+        self.detail.setVisible(not enabled)
+        for index in (0, 3):
+            spacer = self.layout().itemAt(index).spacerItem()
+            if spacer:
+                spacer.changeSize(0, 0, QtWidgets.QSizePolicy.Minimum,
+                                  QtWidgets.QSizePolicy.Ignored if enabled else QtWidgets.QSizePolicy.Expanding)
+        if self._graph is not None:
+            self._graph.setVisible(enabled)
+            if enabled:
+                self._graph.draw_idle()
+        self.layout().invalidate()
+
+    def reset(self):
+        self.show_state("TESTING", "Please wait for the result")
+        if self._graph is not None:
+            self._graph.reset()
+
+    def append_point(self, *args):
+        if self._admin and self._graph is not None:
+            self._graph.append_point(*args)
+
+    def mark_dip(self, *args):
+        if self._admin and self._graph is not None:
+            self._graph.mark_dip(*args)
+
+    def begin_peak_hold(self, *args):
+        if self._admin and self._graph is not None:
+            self._graph.begin_peak_hold(*args)
+
 
 class LiveGraphCanvas(FigureCanvas):
     COLORS = {
@@ -1183,7 +1292,9 @@ class HapticCard(QWidget):
         box_dur,  self.duration_lbl = stat_box("DURATION")
         box_dip,  self.dip_lbl      = stat_box("DIP POINT")
         self._box_dip = box_dip
+        self._admin_stat_boxes = (box_max, box_dur)
         stats.addWidget(box_max); stats.addWidget(box_dur); stats.addWidget(box_dip)
+        box_max.hide(); box_dur.hide()
         root.addLayout(stats)
         self._update_border(False)
 
@@ -2095,6 +2206,22 @@ class Ui_MainWindow(JigCalibrationMixin, QMainWindow):
         tb_lay.addWidget(self.complete_button)
         tb_lay.addSpacing(8)
 
+        view_wrap = QtWidgets.QWidget()
+        view_wrap.setStyleSheet("background:transparent;border:none;")
+        view_layout = QtWidgets.QHBoxLayout(view_wrap)
+        view_layout.setContentsMargins(8, 0, 8, 0)
+        view_layout.setSpacing(9)
+        self.technician_view_label = QtWidgets.QLabel("Technician")
+        self.admin_view_label = QtWidgets.QLabel("Admin")
+        self.technician_view_label.setStyleSheet("color:#FFFFFF;font-size:11px;font-weight:700;")
+        self.admin_view_label.setStyleSheet("color:#71899E;font-size:11px;font-weight:600;")
+        self.admin_view_toggle = ViewToggle()
+        self.admin_view_toggle.toggled.connect(self._set_admin_view)
+        view_layout.addWidget(self.technician_view_label)
+        view_layout.addWidget(self.admin_view_toggle)
+        view_layout.addWidget(self.admin_view_label)
+        tb_lay.addWidget(view_wrap)
+
         self.topbar_clock = QtWidgets.QLabel("--:--:--")
         self.topbar_clock.setStyleSheet(f"color:#C0D4E8; font-size:11px; font-family:Consolas,monospace;")
         tb_lay.addWidget(self.topbar_clock)
@@ -2212,12 +2339,12 @@ class Ui_MainWindow(JigCalibrationMixin, QMainWindow):
 
         self.lineEdit_3 = QtWidgets.QLineEdit()
         self.lineEdit_3.setObjectName("lineEdit_3")
-        self.lineEdit_3.setFixedHeight(int(36*SF))
+        self.lineEdit_3.setFixedHeight(max(54, int(56*SF)))
         self.lineEdit_3.setPlaceholderText("⬡  Scan serial number…")
         self.lineEdit_3.setStyleSheet(f"""
             QLineEdit {{
                 background:#060C16; border:1.5px solid {BORDER2}; border-radius:8px;
-                color:{ACCENT}; font-size:12px; font-weight:600;
+                color:{ACCENT}; font-size:18px; font-weight:700;
                 font-family:Consolas,monospace; padding:0 12px; letter-spacing:1px;
             }}
             QLineEdit:focus {{ border-color:{ACCENT}; background:#080E1A; }}
@@ -2261,8 +2388,8 @@ class Ui_MainWindow(JigCalibrationMixin, QMainWindow):
         self.calibration_schedule_label = QtWidgets.QLabel(f"Calibration: {CALIBRATION_START_TEXT}-{CALIBRATION_END_TEXT} IST daily")
         self.calibration_schedule_label.setWordWrap(True)
         self.calibration_schedule_label.setStyleSheet("color:#F5A623; font-size:11px;")
-        scan_card_lay.addLayout(mode_row)
-        scan_card_lay.addWidget(self.calibration_schedule_label)
+        scan_card_lay.insertLayout(0, mode_row)
+        scan_card_lay.insertWidget(1, self.calibration_schedule_label)
         scan_card_lay.addWidget(self.pushButton_19)
 
         scan_wrap = QtWidgets.QWidget(); scan_wrap.setStyleSheet("background:transparent;")
@@ -2515,7 +2642,8 @@ class Ui_MainWindow(JigCalibrationMixin, QMainWindow):
         gh.setStyleSheet(f"background:{S1}; border-bottom:1px solid {BORDER};")
         ghl = QtWidgets.QHBoxLayout(gh)
         ghl.setContentsMargins(14,0,14,0); ghl.setSpacing(10)
-        gt = QtWidgets.QLabel("DISPLACEMENT – FORCE  LIVE GRAPH")
+        gt = QtWidgets.QLabel("TEST RESULT")
+        self.result_panel_heading = gt
         gt.setStyleSheet(f"color:#9BBCCC; font-size:8px; font-weight:700; letter-spacing:2px; font-family:Consolas,monospace;")
         ghl.addWidget(gt); ghl.addStretch()
         self.label_6 = QtWidgets.QLabel(""); self.label_6.setObjectName("label_6")
@@ -2527,7 +2655,7 @@ class Ui_MainWindow(JigCalibrationMixin, QMainWindow):
         canvas_wrap.setStyleSheet(f"background:{BG}; margin:6px; border-radius:8px; border:1px solid {BORDER};")
         cw_lay = QtWidgets.QVBoxLayout(canvas_wrap)
         cw_lay.setContentsMargins(0,0,0,0)
-        self.live_graph = LiveGraphCanvas()
+        self.live_graph = TestResultPanel()
         self.live_graph.setObjectName("live_graph")
         cw_lay.addWidget(self.live_graph)
 
@@ -2639,20 +2767,11 @@ class Ui_MainWindow(JigCalibrationMixin, QMainWindow):
 
     # ── Animation helpers ─────────────────────────────────────────────
     def _anim_start_run(self, stage="INITIALISING…"):
-        try:
-            # Always stop and rebuild overlay fresh — guarantees 2nd run works
-            try:
-                self.scan_overlay.stop()
-            except Exception:
-                pass
-            self._rebuild_overlay()
-            self.scan_overlay.resize(self.canvas.size())
-            self.scan_overlay.start(stage)
-            self._set_status_running(f"▶   {stage}")
-            self.pushButton_19.setEnabled(False)
-            self.pushButton_7.setEnabled(False)
-        except RuntimeError:
-            pass
+        self.graph_stack.setCurrentIndex(0)
+        self.live_graph.show_state("TESTING", stage)
+        self._set_status_running(f"▶   {stage}")
+        self.pushButton_19.setEnabled(False)
+        self.pushButton_7.setEnabled(False)
 
     def _is_overlay_alive(self):
         """Return True only when the C++ ScanLineOverlay object still exists."""
@@ -2672,14 +2791,8 @@ class Ui_MainWindow(JigCalibrationMixin, QMainWindow):
             pass
 
     def _anim_set_stage(self, stage):
-        """Update the stage label mid-run."""
-        try:
-            if not self._is_overlay_alive():
-                self._rebuild_overlay()
-            self.scan_overlay.set_stage(stage)
-            self._set_status_running(f"▶   {stage}")
-        except RuntimeError:
-            pass
+        self.live_graph.show_state("TESTING", stage)
+        self._set_status_running(f"▶   {stage}")
 
     def _anim_finish_pass(self):
         try:
@@ -2698,171 +2811,25 @@ class Ui_MainWindow(JigCalibrationMixin, QMainWindow):
         """)
         self.label_2.setText("✓   PASS — TEST COMPLETE")
 
-        # ── Full-screen centred PASS popup called from plot() with dip values
+        self._show_result_popup(passed=True)
+        # Production plot supplies DIP details after the result is finalized.
 
         self.pushButton_19.setEnabled(True)
         self.pushButton_7.setEnabled(True)
 
+    def _set_admin_view(self, enabled):
+        self.technician_view_label.setStyleSheet("color:%s;font-size:11px;font-weight:700;" % ("#71899E" if enabled else "#FFFFFF"))
+        self.admin_view_label.setStyleSheet("color:%s;font-size:11px;font-weight:700;" % ("#78BBFF" if enabled else "#71899E"))
+        self.live_graph.set_admin(enabled)
+        for card in (self.haptic_right, self.haptic_centre, self.haptic_left):
+            for box in card._admin_stat_boxes:
+                box.setVisible(enabled)
+        self.result_panel_heading.setText("DISPLACEMENT – FORCE LIVE GRAPH" if enabled else "TEST RESULT")
+
     def _show_result_popup(self, passed: bool, dip_text: str = ""):
-        """
-        Shows a large centered popup over the entire window.
-        Animates in (scale up + fade in), holds for 2.5s, then fades out.
-        """
-        # ── Overlay dims the whole window ─────────────────────────────
-        class _ResultPopup(QtWidgets.QWidget):
-            def __init__(self, parent, passed, dip_text):
-                super().__init__(parent)
-                self._passed   = passed
-                self._dip_text = dip_text
-                self._alpha    = 0.0     # 0→1 fade-in
-                self._scale    = 0.72    # scale-up from 72%→100%
-                self._phase    = 0       # 0=in, 1=hold, 2=out
-                self._hold_ms  = 0
-                self._pulse    = 0.0
-                self._pulse_up = True
-
-                self.setAttribute(Qt.WA_TransparentForMouseEvents, False)
-                self.setStyleSheet("background:transparent;")
-                self.resize(parent.size())
-                self.raise_()
-                self.show()
-
-                self._timer = QTimer(self)
-                self._timer.setInterval(16)   # ~60fps
-                self._timer.timeout.connect(self._tick)
-                self._timer.start()
-
-            def _tick(self):
-                if self._phase == 0:       # fade in + scale up
-                    self._alpha = min(1.0, self._alpha + 0.06)
-                    self._scale = min(1.0, self._scale + 0.022)
-                    if self._alpha >= 1.0 and self._scale >= 1.0:
-                        self._phase = 1
-                elif self._phase == 1:     # hold with pulse
-                    self._hold_ms += 16
-                    step = 0.04
-                    if self._pulse_up:
-                        self._pulse = min(1.0, self._pulse + step)
-                        if self._pulse >= 1.0: self._pulse_up = False
-                    else:
-                        self._pulse = max(0.0, self._pulse - step)
-                        if self._pulse <= 0.0: self._pulse_up = True
-                    if self._hold_ms >= 2200:
-                        self._phase = 2
-                elif self._phase == 2:     # fade out faster
-                    self._alpha = max(0.0, self._alpha - 0.10)
-                    if self._alpha <= 0.0:
-                        self._timer.stop()
-                        self.hide()
-                        self.deleteLater()
-                        return
-                self.update()
-
-            def paintEvent(self, _):
-                from PyQt5.QtGui import (QPainter, QColor, QPen,
-                                          QLinearGradient, QRadialGradient,
-                                          QPainterPath, QFont)
-                p = QPainter(self)
-                p.setRenderHint(QPainter.Antialiasing)
-                W, H = self.width(), self.height()
-                a = self._alpha
-
-                # ── dark scrim over everything ────────────────────────
-                p.fillRect(0, 0, W, H, QColor(0, 0, 0, int(160*a)))
-
-                # ── card dimensions ────────────────────────────────────
-                card_w = int(min(W*0.28, 280))
-                card_h = int(min(H*0.22, 155))
-                sx = int(W//2 - card_w//2 * self._scale)
-                sy = int(H//2 - card_h//2 * self._scale)
-                sw = int(card_w * self._scale)
-                sh = int(card_h * self._scale)
-
-                if self._passed:
-                    col_main  = QColor(0, 220, 120)
-                    col_bg    = QColor(4, 28, 16, int(245*a))
-                    col_border= QColor(0, 200, 100, int(230*a))
-                    col_glow  = QColor(0, 255, 140, int(40*a*(0.5+0.5*self._pulse)))
-                    icon      = "✓"
-                    title     = "PASS"
-                    subtitle  = ""
-                else:
-                    col_main  = QColor(255, 80, 80)
-                    col_bg    = QColor(28, 4, 4, int(245*a))
-                    col_border= QColor(220, 60, 60, int(230*a))
-                    col_glow  = QColor(255, 80, 80, int(40*a*(0.5+0.5*self._pulse)))
-                    icon      = "✗"
-                    title     = "FAIL"
-                    subtitle  = ""
-
-                col_main.setAlpha(int(255*a))
-
-                # ── card radial glow behind ───────────────────────────
-                glow = QRadialGradient(W//2, H//2, int(sw*0.72))
-                glow.setColorAt(0.0, col_glow)
-                glow.setColorAt(1.0, QColor(0,0,0,0))
-                p.setPen(Qt.NoPen); p.setBrush(glow)
-                p.drawEllipse(W//2-sw, H//2-sh, sw*2, sh*2)
-
-                # ── card background ────────────────────────────────────
-                card_path = QPainterPath()
-                card_path.addRoundedRect(sx, sy, sw, sh, 18, 18)
-                p.setBrush(col_bg)
-
-                # pulsing border width
-                bw = 2.0 + 1.5*self._pulse
-                pen_col = QColor(col_border)
-                p.setPen(QPen(pen_col, bw))
-                p.drawPath(card_path)
-
-                # ── top accent bar ────────────────────────────────────
-                bar = QPainterPath()
-                bar.addRoundedRect(sx+2, sy+2, sw-4, int(sh*0.06), 14, 14)
-                bar_c = QColor(col_main)
-                p.setPen(Qt.NoPen); p.setBrush(bar_c); p.drawPath(bar)
-
-                # ── big icon ──────────────────────────────────────────
-                icon_size = int(sh*0.42)
-                p.setFont(QFont("Consolas", icon_size, QFont.Bold))
-                p.setPen(col_main)
-                p.drawText(sx, sy + int(sh*0.12),
-                           sw, int(sh*0.52), Qt.AlignCenter, icon)
-
-                # ── PASS / FAIL title ─────────────────────────────────
-                title_size = max(14, int(sh*0.16))
-                p.setFont(QFont("Consolas", title_size, QFont.Bold))
-                tc = QColor(col_main); tc.setAlpha(int(255*a))
-                p.setPen(tc)
-                p.drawText(sx, sy+int(sh*0.56), sw, int(sh*0.20),
-                           Qt.AlignCenter, title)
-
-                # ── subtitle ──────────────────────────────────────────
-                sub_size = max(8, int(sh*0.075))
-                p.setFont(QFont("Consolas", sub_size))
-                sc2 = QColor(180, 210, 195, int(200*a)) if self._passed else QColor(220,160,160,int(200*a))
-                p.setPen(sc2)
-                p.drawText(sx, sy+int(sh*0.74), sw, int(sh*0.15),
-                           Qt.AlignCenter, subtitle)
-
-                # ── dip values if provided ────────────────────────────
-                if self._dip_text:
-                    dv_size = max(7, int(sh*0.065))
-                    p.setFont(QFont("Consolas", dv_size, QFont.Bold))
-                    dvc = QColor(col_main); dvc.setAlpha(int(180*a))
-                    p.setPen(dvc)
-                    p.drawText(sx, sy+int(sh*0.86), sw, int(sh*0.12),
-                               Qt.AlignCenter, self._dip_text)
-
-                p.end()
-
-            def mousePressEvent(self, _):
-                # click anywhere to dismiss early
-                self._phase = 2
-
-        try:
-            _ResultPopup(self.centralwidget, passed, dip_text)
-        except Exception as e:
-            logger.exception("Popup error: %s", e)
+        self.graph_stack.setCurrentIndex(0)
+        self.live_graph.show_state("PASS" if passed else "FAIL", dip_text or self.label_2.text(),
+                                   "#00FF88" if passed else "#FF4F4F")
 
     @QtCore.pyqtSlot()
     def _anim_finish_fail(self):
@@ -3471,14 +3438,7 @@ class Ui_MainWindow(JigCalibrationMixin, QMainWindow):
                 self.live_graph.begin_peak_hold(graph_key)
 
         def collect(data):
-            # Force decisions must precede graph/UI work on the reader thread.
-            check_force(data)
-            try:
-                callback(data)
-            except Exception:
-                logger.exception("Graph callback failed; force monitoring remains active")
-
-        def check_force(data):
+            callback(data)
             point = self._parse_point(data)
             if not active or point is None or not math.isfinite(point[0]):
                 return
@@ -3574,8 +3534,6 @@ class Ui_MainWindow(JigCalibrationMixin, QMainWindow):
         try:
             # Finish original positioning before starting the cancellable press.
             wait_idle()
-            if self._press_abort.is_set():
-                raise RuntimeError("Sequence aborted before pressing")
             active = True
             state["last_sample"] = time.monotonic()
             # Short relative jogs are streamed ahead without waiting for each
@@ -3590,9 +3548,7 @@ class Ui_MainWindow(JigCalibrationMixin, QMainWindow):
             while True:
                 now = time.monotonic()
                 if not state["cancelled"]:
-                    if self._press_abort.is_set():
-                        state["failure"] = "Press cancelled: sequence aborted"
-                    elif now - state["last_sample"] > 0.5:
+                    if now - state["last_sample"] > 0.5:
                         state["failure"] = "Force readings stopped during press"
                     elif now >= deadline:
                         state["failure"] = "No force stop reached within press timeout"
@@ -3739,28 +3695,16 @@ class Ui_MainWindow(JigCalibrationMixin, QMainWindow):
             self._anim_reset()
             return
 
-        self._press_abort = threading.Event()
-        self._active_press_worker = None
-
-        def cancel_active_press():
-            self._press_abort.set()
-            port = self.serial_thread.ser
-            if port is not None and port.is_open:
-                port.write(b"\x85")  # Cancel all queued jog segments.
-                port.write(b"!")     # Hold any regular movement on an abort.
-
         def _run():
             press_worker = None
             press_errors = []
             clearance_move = "G0 Z2.410"
 
             def check_press_finished():
-                # Keep the reader running while waiting for motion supervision.
                 if press_worker is not None:
-                    press_worker.join(timeout=20.0)
+                    press_worker.join(timeout=25.0)
                     if press_worker.is_alive():
-                        cancel_active_press()
-                        raise RuntimeError("Press worker did not finish; motion cancelled")
+                        raise RuntimeError("Press worker did not finish; sequence aborted")
                 if press_errors:
                     raise press_errors[0]
 
@@ -3770,12 +3714,8 @@ class Ui_MainWindow(JigCalibrationMixin, QMainWindow):
 
                 def press():
                     try:
-                        if self._press_abort.is_set():
-                            raise RuntimeError("Sequence aborted before positioning")
                         self.send_gcode(position, callback)
                         self._press_until_dip_plus_2n(callback)
-                        if self._press_abort.is_set():
-                            raise RuntimeError("Sequence aborted before retract")
                         self.send_gcode(clearance_move, callback)
                         if self._calibration_mode:
                             result = self._force_press_results.get(callback.__name__.replace("handle_data_btn", ""), {})
@@ -3786,13 +3726,11 @@ class Ui_MainWindow(JigCalibrationMixin, QMainWindow):
                             self.send_gcode("G0 X10.762 Y56.259", callback)
                             self.send_gcode("G0 Z6.410", callback)
                     except Exception as exc:
-                        cancel_active_press()
                         press_errors.append(exc)
                         print(f"MOTOR ERROR: {exc}", flush=True)
                         self._sig_motor_error.emit(str(exc))
 
                 press_worker = threading.Thread(target=press, daemon=True)
-                self._active_press_worker = press_worker
                 press_worker.start()
 
             # Use plain time.sleep — we are already off the main thread
@@ -3854,17 +3792,7 @@ class Ui_MainWindow(JigCalibrationMixin, QMainWindow):
                 if self._calibration_mode:
                     QtCore.QMetaObject.invokeMethod(self, "_calibration_aborted", Qt.QueuedConnection)
                 print(f"Dip-controlled press aborted: {exc}")
-                cancel_active_press()
-                worker = self._active_press_worker
-                if worker is not None:
-                    worker.join(timeout=20.0)
-                if worker is not None and worker.is_alive():
-                    # Do not close ports under a live motion worker or permit a new test.
-                    self._homed = False
-                    print("Motion worker still active; force reader retained. Restart required.", flush=True)
-                else:
-                    self.serial_thread.stop(keep_grbl_open=True)
-                self._homed = False  # An aborted motion requires rehoming/restart.
+                self.serial_thread.stop(keep_grbl_open=True)
                 QtCore.QMetaObject.invokeMethod(self, "_anim_finish_fail", Qt.QueuedConnection)
                 QtCore.QMetaObject.invokeMethod(self, "_progress_done_fail", Qt.QueuedConnection)
 
@@ -4137,6 +4065,7 @@ class Ui_MainWindow(JigCalibrationMixin, QMainWindow):
             self._anim_finish_fail()
             self._progress_done_fail()
             self.label_2.setText(f"✗   FAIL — {fail_reason}")
+            self._show_result_popup(passed=False, dip_text=fail_reason)
 
         self.handle_button_press(imageName, total_data, auto_result, dips)
         return total_data
@@ -4175,7 +4104,7 @@ class Ui_MainWindow(JigCalibrationMixin, QMainWindow):
                         button_names[button_key].replace("Failed", "Not Detected")
                     )
                     printer_failed_points.append("No DIP")
-                elif not (5 <= failed_point <= 15):
+                elif not (8.5 <= failed_point <= 20.5):
                     printer_issues.append(button_names[button_key])
                     printer_failed_points.append(failed_point)
 
